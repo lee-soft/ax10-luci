@@ -119,7 +119,13 @@ cp "$WORK/lucihttp/B/lua/lucihttp.so"     "$DIST/usr/lib/lua/lucihttp.so"
 cp "$WORK/ip.so"                          "$DIST/usr/lib/lua/luci/ip.so"
 cp "$WORK/jsonc.so"                       "$DIST/usr/lib/lua/luci/jsonc.so"
 cp "$WORK/luci-base-src/parser.so"        "$DIST/usr/lib/lua/luci/template/parser.so"
-cp -a "$HERE/dist-overlay/." "$DIST/"     # version.lua, dispatcher.lua, cgi-bin wrappers, luci-archer.json
+cp -a "$HERE/dist-overlay/." "$DIST/"     # version.lua, dispatcher.lua, cgi-bin wrappers, luci-archer.json,
+                                          # protocol/*.js, + the UI JS that drifted from the working build
+                                          # (network.js, view/network/wireless.js, view/status/{index,dmesg,
+                                          # routes,syslog}.js, view/system/leds.js, header.htm): the upstream
+                                          # 21.02 .ipk snapshot hardcodes /www in status/index.js (breaks the
+                                          # overview: docroot is /tmp/luci-app/www) and has generic wireless
+                                          # naming — the vendored copies use L.env.documentroot + correct names.
 "${CROSS}strip" "$DIST/file.so" "$DIST/usr/libexec/cgi-io" "$DIST/usr/lib/liblucihttp.so" "$DIST/usr/lib/lua/lucihttp.so" "$DIST/usr/lib/lua/luci/template/parser.so" 2>/dev/null || true
 ( cd "$DIST" && tar --owner=0 --group=0 -czf "$OUT/luci-dist.tar.gz" . )
 echo ">> built $OUT/luci-dist.tar.gz ($(tar tzf "$OUT/luci-dist.tar.gz" | wc -l) entries)"
