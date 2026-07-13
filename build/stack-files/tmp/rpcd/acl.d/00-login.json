@@ -1,0 +1,2 @@
+{ "unauthenticated": { "description": "Allow login + access probing",
+  "read": { "ubus": { "session": [ "login", "access", "get" ] } } } }

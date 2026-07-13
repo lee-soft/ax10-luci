@@ -1,11 +1,13 @@
-name: build-ipk
+name: build-ipk (luci-stack from source via newstack)
 
-# Packs this package into an .ipk and publishes it to the repo's rolling "ipk" release.
-# The archer-ax10 feed aggregates these per-package .ipks into Packages(.gz).
+# Builds luci-stack.tar.gz from source (rpcd/uhttpd/rpcd-mod-luci/json-c/luci-bwc) inside the
+# newstack toolchain image, stages it into the package alongside the (still-vendored) luci-dist
+# tree, packs the .ipk, and publishes it to this repo's "ipk" release. The luci-stack binaries
+# are build outputs and are NOT committed. (luci-dist from-source is phase 2.)
 
 on:
   push:
-    paths: ['control', 'data/**', 'preinst', 'postinst', 'prerm', 'postrm', 'conffiles', 'pack.sh', '.github/workflows/build-ipk.yml']
+    paths: ['control', 'postinst', 'prerm', 'build/**', 'pack.sh', 'data/opt/ax10-luci/luci-setup.sh', '.github/workflows/build-ipk.yml']
   workflow_dispatch:
 
 permissions:
@@ -14,13 +16,24 @@ permissions:
 jobs:
   ipk:
     runs-on: ubuntu-latest
+    container: ghcr.io/lee-soft/newstack:latest      # glibc-2.26 ARM cross toolchain on PATH
     steps:
       - uses: actions/checkout@v4
+
+      - name: Build luci-stack from source
+        run: sh build/build.sh
+
+      - name: Stage the built luci-stack into the package
+        run: |
+          cp build/out/luci-stack.tar.gz data/opt/ax10-luci/luci-stack.tar.gz
+          ls -l data/opt/ax10-luci/
+
       - name: Pack .ipk
         run: sh pack.sh
+
       - name: Publish .ipk to the 'ipk' release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create ipk dist/*.ipk --title "opkg package (.ipk)" --notes "Latest built package. Consumed by the archer-ax10 feed." \
+          gh release create ipk dist/*.ipk --title "opkg package (.ipk)" --notes "luci-stack built from source via newstack; luci-dist vendored (phase 2)." \
             || gh release upload ipk dist/*.ipk --clobber

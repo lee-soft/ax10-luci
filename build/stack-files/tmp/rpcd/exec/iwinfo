@@ -1,0 +1,188 @@
+#!/usr/bin/lua
+-- rpcd exec plugin: provides the ubus object "iwinfo" that LuCI 21.02's JS
+-- calls for live wifi data, by wrapping the router's lua iwinfo binding
+-- (require "iwinfo") — which uses libiwinfo's native Broadcom "wl" backend.
+-- No rpcd-mod-iwinfo C build needed. Read-only.
+-- Protocol: `<exe> list` -> method sigs ; `<exe> call <method>` (args on stdin)
+
+local ok_iw, iw = pcall(require, "iwinfo")
+
+-- ---------- JSON encoder ----------
+local function arr(t) return setmetatable(t or {}, {__jsonarray = true}) end
+local ESC = {['"']='\\"', ['\\']='\\\\', ['\n']='\\n', ['\r']='\\r', ['\t']='\\t'}
+local function enc(v)
+  local t = type(v)
+  if v == nil then return "null"
+  elseif t == "boolean" then return v and "true" or "false"
+  elseif t == "number" then
+    if v ~= v or v == math.huge or v == -math.huge then return "0" end
+    if v == math.floor(v) then return string.format("%d", v) end
+    return string.format("%.6f", v)
+  elseif t == "string" then
+    return '"' .. v:gsub('[%z\1-\31\\"]', function(c) return ESC[c] or string.format('\\u%04x', string.byte(c)) end) .. '"'
+  elseif t == "table" then
+    local mt = getmetatable(v)
+    if mt and mt.__jsonarray then
+      local p = {} for i = 1, #v do p[i] = enc(v[i]) end
+      return "[" .. table.concat(p, ",") .. "]"
+    end
+    local n, isarr = 0, true
+    for k in pairs(v) do n = n + 1; if type(k) ~= "number" then isarr = false end end
+    if isarr and n > 0 then for i = 1, n do if v[i] == nil then isarr = false break end end else isarr = false end
+    local p = {}
+    if isarr then for i = 1, n do p[i] = enc(v[i]) end; return "[" .. table.concat(p, ",") .. "]" end
+    for k, val in pairs(v) do p[#p+1] = enc(tostring(k)) .. ":" .. enc(val) end
+    return "{" .. table.concat(p, ",") .. "}"
+  end
+  return "null"
+end
+local function reply(v) io.write(enc(v)); io.write("\n"); io.stdout:flush() end
+
+-- ---------- helpers ----------
+local RAW = ""
+local function readargs() RAW = io.read("*a") or "" end
+local function astr(k) return RAW:match('"' .. k .. '"%s*:%s*"(.-)"') end
+local function popen(cmd) local f = io.popen(cmd); if not f then return "" end; local s = f:read("*a"); f:close(); return s or "" end
+
+-- normalise libiwinfo's raw crypto struct (wpa bitmask number, auth_suites,
+-- pair/group_ciphers) into the ubus schema LuCI's formatWifiEncryption wants
+-- (wpa/authentication/ciphers as arrays) — else every AP shows "Unknown".
+local function norm_enc(e)
+  if type(e) ~= "table" or not e.enabled then return { enabled = false } end
+  local out, seen, ciphers = { enabled = true }, {}, arr({})
+  local function addc(list) for _, c in ipairs(list or {}) do
+    local k = tostring(c):lower(); if not seen[k] then seen[k] = true; ciphers[#ciphers+1] = k end end end
+  addc(e.pair_ciphers); addc(e.group_ciphers)
+  out.ciphers = ciphers
+  if e.wep then
+    out.wep = arr({ "open" })
+  else
+    local wv, vers, auth, hassae = tonumber(e.wpa) or 0, arr({}), arr({}), false
+    if wv % 2 >= 1 then vers[#vers+1] = 1 end
+    if math.floor(wv / 2) % 2 >= 1 then vers[#vers+1] = 2 end
+    for _, a in ipairs(e.auth_suites or {}) do
+      local k = tostring(a):lower(); if k == "8021x" then k = "802.1x" end
+      auth[#auth+1] = k; if k == "sae" then hassae = true end
+    end
+    if hassae and #vers == 0 then vers[#vers+1] = 3 end
+    out.wpa = vers
+    out.authentication = (#auth > 0) and auth or arr({ "none" })
+  end
+  return out
+end
+
+-- backend table for a device (the wl backend), or nil
+local function be(dev)
+  if not ok_iw or not dev then return nil end
+  local t = iw.type(dev)
+  if not t then return nil end
+  return iw[t], t
+end
+
+-- enumerate wifi netdevs the binding recognises
+local function wifi_devices()
+  local list = {}
+  for name in popen("ls -1 /sys/class/net 2>/dev/null"):gmatch("[^\n]+") do
+    if name:match("^wl%d") and iw and iw.type(name) then list[#list+1] = name end
+  end
+  return list
+end
+
+-- ---------- methods ----------
+local M = {}
+
+function M.devices()
+  reply({ devices = arr(wifi_devices()) })
+end
+
+function M.phyname()
+  -- LuCI passes a uci wifi-device section; on brcmwifi the phy IS the device name
+  local section = astr("section") or astr("device")
+  reply(section)
+end
+
+function M.info()
+  local dev = astr("device"); local b = be(dev)
+  if not b then reply({}); return end
+  local hw = {}
+  for m, on in pairs(b.hwmodelist and b.hwmodelist(dev) or {}) do if on then hw[#hw+1] = m end end
+  local ht = {}
+  for m, on in pairs(b.htmodelist and b.htmodelist(dev) or {}) do if on then ht[#ht+1] = m end end
+  reply({
+    phy       = dev,
+    ssid      = b.ssid(dev),
+    bssid     = b.bssid(dev),
+    country   = b.country(dev),
+    mode      = b.mode(dev),
+    channel   = b.channel(dev),
+    frequency = b.frequency(dev),
+    frequency_offset = b.frequency_offset and b.frequency_offset(dev) or 0,
+    txpower   = b.txpower(dev),
+    txpower_offset = b.txpower_offset and b.txpower_offset(dev) or 0,
+    quality     = b.quality(dev) or 0,
+    quality_max = b.quality_max(dev) or 0,
+    signal    = b.signal(dev) or 0,
+    noise     = b.noise(dev) or 0,
+    bitrate   = b.bitrate(dev),
+    encryption = norm_enc(b.encryption and b.encryption(dev) or {}),
+    hwmodes   = arr(hw),
+    htmodes   = arr(ht),
+    hardware  = { name = b.hardware_name and b.hardware_name(dev) or "Broadcom",
+                  id = b.hardware_id and b.hardware_id(dev) or {} },
+  })
+end
+
+function M.assoclist()
+  local dev = astr("device"); local b = be(dev)
+  local res = {}
+  if b and b.assoclist then
+    for mac, st in pairs(b.assoclist(dev) or {}) do
+      if type(st) == "table" then st.mac = mac; res[#res+1] = st
+      else res[#res+1] = { mac = mac } end
+    end
+  end
+  reply({ results = arr(res) })
+end
+
+function M.freqlist()
+  local dev = astr("device"); local b = be(dev)
+  reply({ results = arr(b and b.freqlist and b.freqlist(dev) or {}) })
+end
+
+function M.txpowerlist()
+  local dev = astr("device"); local b = be(dev)
+  reply({ results = arr(b and b.txpwrlist and b.txpwrlist(dev) or {}) })
+end
+
+function M.countrylist()
+  local dev = astr("device"); local b = be(dev)
+  local res = {}
+  for _, c in ipairs(b and b.countrylist and b.countrylist(dev) or {}) do
+    res[#res+1] = { code = c.ccode or c.alpha2, country = c.name }
+  end
+  reply({ results = arr(res) })
+end
+
+function M.scan()
+  local dev = astr("device"); local b = be(dev)
+  reply({ results = arr(b and b.scanlist and b.scanlist(dev) or {}) })
+end
+
+function M.survey()
+  reply({ results = arr({}) })
+end
+
+-- ---------- dispatch ----------
+local cmd, method = arg[1], arg[2]
+if cmd == "list" then
+  reply({
+    devices = {}, phyname = { section = "" }, info = { device = "" },
+    assoclist = { device = "", mac = "" }, freqlist = { device = "" },
+    txpowerlist = { device = "" }, countrylist = { device = "" },
+    scan = { device = "" }, survey = { device = "" },
+  })
+elseif cmd == "call" then
+  readargs()
+  local fn = M[method]
+  if fn then fn() else io.write('{"error":"unknown method"}\n') end
+end

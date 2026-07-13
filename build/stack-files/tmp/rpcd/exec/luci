@@ -1,0 +1,357 @@
+#!/usr/bin/lua
+-- rpcd exec plugin: provides ubus object "luci" (the half of rpcd-mod-luci
+-- that lands in 21.02 but not 19.07). getNetworkDevices/getDHCPLeases/etc.
+-- still come from our C luci-rpc object; this file adds getFeatures + friends.
+-- rpcd protocol:  <exe> list                -> JSON of {method={arg=type}}
+--                 <exe> call <method>  (JSON args on stdin) -> JSON result
+
+-- ---------- tiny JSON encoder (emit only) ----------
+local function arr(t) return setmetatable(t or {}, {__jsonarray = true}) end
+local ESC = {['"']='\\"', ['\\']='\\\\', ['\n']='\\n', ['\r']='\\r', ['\t']='\\t'}
+local function enc(v)
+  local t = type(v)
+  if v == nil then return "null"
+  elseif t == "boolean" then return v and "true" or "false"
+  elseif t == "number" then
+    if v ~= v or v == math.huge or v == -math.huge then return "0" end
+    if v == math.floor(v) then return string.format("%d", v) end
+    return string.format("%.6f", v)
+  elseif t == "string" then
+    return '"' .. v:gsub('[%z\1-\31\\"]', function(c)
+      return ESC[c] or string.format('\\u%04x', string.byte(c)) end) .. '"'
+  elseif t == "table" then
+    local mt = getmetatable(v)
+    if mt and mt.__jsonarray then
+      local p = {}
+      for i = 1, #v do p[i] = enc(v[i]) end
+      return "[" .. table.concat(p, ",") .. "]"
+    end
+    local n, isarr = 0, true
+    for k in pairs(v) do n = n + 1; if type(k) ~= "number" then isarr = false end end
+    if isarr and n > 0 then
+      for i = 1, n do if v[i] == nil then isarr = false break end end
+    else isarr = false end
+    local p = {}
+    if isarr then
+      for i = 1, n do p[i] = enc(v[i]) end
+      return "[" .. table.concat(p, ",") .. "]"
+    end
+    for k, val in pairs(v) do p[#p+1] = enc(tostring(k)) .. ":" .. enc(val) end
+    return "{" .. table.concat(p, ",") .. "}"
+  end
+  return "null"
+end
+local function reply(v) io.write(enc(v)); io.write("\n"); io.stdout:flush() end
+
+-- ---------- helpers ----------
+local function ex(p) local f = io.open(p, "r"); if f then f:close(); return true end; return false end
+local function slurp(p) local f = io.open(p, "r"); if not f then return nil end; local s = f:read("*a"); f:close(); return s end
+local function popen(cmd) local f = io.popen(cmd); if not f then return "" end; local s = f:read("*a"); f:close(); return s or "" end
+
+-- flat-arg extraction from stdin JSON (args here are all flat string/number)
+local RAW = ""
+local function readargs() RAW = io.read("*a") or "" end
+local function astr(k) return RAW:match('"' .. k .. '"%s*:%s*"(.-)"') end
+local function anum(k) return tonumber(RAW:match('"' .. k .. '"%s*:%s*(%-?%d+%.?%d*)')) end
+
+-- iwinfo (the router's lua binding -> libiwinfo native Broadcom "wl" backend)
+local ok_iw, iw = pcall(require, "iwinfo")
+-- The lua binding hands back libiwinfo's RAW crypto struct (wpa as a version
+-- bitmask number, auth_suites/pair_ciphers/group_ciphers). LuCI's
+-- formatWifiEncryption instead wants the ubus schema: wpa/authentication/ciphers
+-- as ARRAYS. Without this normalisation every AP renders "Encryption: Unknown".
+local function norm_enc(e)
+  if type(e) ~= "table" or not e.enabled then return { enabled = false } end
+  local out, seen, ciphers = { enabled = true }, {}, arr({})
+  local function addc(list) for _, c in ipairs(list or {}) do
+    local k = tostring(c):lower(); if not seen[k] then seen[k] = true; ciphers[#ciphers+1] = k end end end
+  addc(e.pair_ciphers); addc(e.group_ciphers)
+  out.ciphers = ciphers
+  if e.wep then
+    out.wep = arr({ "open" })
+  else
+    local wv, vers, auth, hassae = tonumber(e.wpa) or 0, arr({}), arr({}), false
+    if wv % 2 >= 1 then vers[#vers+1] = 1 end
+    if math.floor(wv / 2) % 2 >= 1 then vers[#vers+1] = 2 end
+    for _, a in ipairs(e.auth_suites or {}) do
+      local k = tostring(a):lower(); if k == "8021x" then k = "802.1x" end
+      auth[#auth+1] = k; if k == "sae" then hassae = true end
+    end
+    if hassae and #vers == 0 then vers[#vers+1] = 3 end
+    out.wpa = vers
+    out.authentication = (#auth > 0) and auth or arr({ "none" })
+  end
+  return out
+end
+local function iwinfo_of(dev)
+  if not ok_iw or not dev then return {} end
+  local t = iw.type(dev); if not t then return {} end
+  local b = iw[t]
+  local hw = {}
+  for m, on in pairs(b.hwmodelist and b.hwmodelist(dev) or {}) do if on then hw[#hw+1] = m end end
+  return {
+    mode = b.mode(dev), ssid = b.ssid(dev), bssid = b.bssid(dev),
+    channel = b.channel(dev), frequency = b.frequency(dev),
+    txpower = b.txpower(dev), signal = b.signal(dev) or 0, noise = b.noise(dev) or 0,
+    quality = b.quality(dev) or 0, quality_max = b.quality_max(dev) or 0,
+    bitrate = b.bitrate(dev), country = b.country(dev),
+    encryption = norm_enc(b.encryption and b.encryption(dev) or {}),
+    hwmodes = arr(hw),
+    hardware = { name = b.hardware_name and b.hardware_name(dev) or "Broadcom" },
+  }
+end
+
+-- ---------- methods ----------
+local M = {}
+
+-- getWirelessDevices: radio tree from /etc/config/wireless + live iwinfo,
+-- matching rpcd-mod-luci's shape (network.js matches interface.section -> uci sid).
+function M.getWirelessDevices()
+  local devices, ifaces = {}, {}
+  local ctx
+  for line in (slurp("/etc/config/wireless") or ""):gmatch("[^\n]+") do
+    local typ, nm = line:match("^config%s+(%S+)%s+'([^']*)'")
+    if not typ then typ, nm = line:match("^config%s+(%S+)%s+(%S+)") end
+    if typ then
+      if typ == "wifi-device" then
+        devices[nm] = { config = {}, interfaces = {} }; ctx = devices[nm].config
+      elseif typ == "wifi-iface" then
+        local ifc = { section = nm, config = {} }; ifaces[#ifaces+1] = ifc; ctx = ifc.config
+      else ctx = nil end
+    else
+      local k, v = line:match("^%s*option%s+(%S+)%s+'([^']*)'")
+      if not k then k, v = line:match("^%s*option%s+(%S+)%s+(%S+)") end
+      if k and ctx then ctx[k] = v end
+    end
+  end
+  for _, ifc in ipairs(ifaces) do
+    local ifname = ifc.config.ifname or ifc.config.device or ifc.section
+    ifc.ifname = ifname
+    ifc.iwinfo = iwinfo_of(ifname)
+    local radio = ifc.config.device or ifname:match("^(wl%d)") or ifname
+    if devices[radio] then table.insert(devices[radio].interfaces, ifc) end
+  end
+  for name, d in pairs(devices) do
+    d.up = (ok_iw and iw.type(name) ~= nil) and true or false
+    d.disabled = (d.config.disabled == "on") or (d.config.disabled_all == "on")
+    d.iwinfo = iwinfo_of(name)
+    d.interfaces = arr(d.interfaces)
+  end
+  reply(devices)
+end
+
+function M.getFeatures()
+  local f = {
+    swconfig   = ex("/sbin/swconfig"),
+    offloading = ex("/sys/module/nf_flow_table") or ex("/sys/module/xt_FLOWOFFLOAD"),
+    br2684ctl  = ex("/usr/sbin/br2684ctl"),
+    dsl        = ex("/etc/init.d/dsl_control"),
+    sysntpd    = ex("/etc/init.d/sysntpd") or ex("/usr/sbin/ntpd"),
+    ipv6       = ex("/proc/net/ipv6_route"),
+    dropbear   = ex("/usr/sbin/dropbear") or ex("/tmp/dropbear_vanilla"),
+    cabundle   = ex("/etc/ssl/certs/ca-certificates.crt"),
+    relayd     = ex("/usr/sbin/relayd"),
+    firewall   = ex("/sbin/fw3"),
+    firewall4  = ex("/sbin/fw4"),
+    opkg       = ex("/bin/opkg"),
+    apk        = ex("/usr/bin/apk"),
+    dnsmasq    = { dhcpv6 = ex("/proc/net/ipv6_route"), dnssec = false, ipset = false, override = true },
+    -- wifi is the stubbed zone; advertise generous caps so the encryption
+    -- dropdown is usable once getWirelessDevices is implemented.
+    hostapd       = { wpa2 = true, wpa3 = true, sae = true, owe = true, eap = true, ["11r"] = true, ["11w"] = true, wps = false },
+    wpasupplicant = { wpa2 = true, wpa3 = true, sae = true, owe = true, eap = true, ["11r"] = true, ["11w"] = true },
+  }
+  reply(f)
+end
+
+function M.getInitList()
+  local only = astr("name")
+  local out = {}
+  local ls = popen("ls -1 /etc/init.d 2>/dev/null")
+  for name in ls:gmatch("[^\n]+") do
+    if not only or only == name then
+      local body = slurp("/etc/init.d/" .. name) or ""
+      local idx = tonumber(body:match("START=(%d+)")) or 50
+      local enabled = false
+      local rc = popen("ls /etc/rc.d/S*" .. name .. " 2>/dev/null")
+      if rc:match("%S") then enabled = true end
+      out[name] = { index = idx, enabled = enabled }
+    end
+  end
+  reply(out)
+end
+
+function M.setInitAction()
+  local name, action = astr("name"), astr("action")
+  local ok = false
+  if name and action and name:match("^[%w._-]+$") and action:match("^[%w]+$") then
+    if ex("/etc/init.d/" .. name) then
+      os.execute("/etc/init.d/" .. name .. " " .. action .. " >/dev/null 2>&1")
+      ok = true
+    end
+  end
+  reply({ result = ok })
+end
+
+function M.getProcessList()
+  -- LuCI status/processes.js reads UPPERCASE ps-style keys: PID,USER,COMMAND,%CPU,%MEM
+  local list = {}
+  local uidname = {}
+  for line in (slurp("/etc/passwd") or ""):gmatch("[^\n]+") do
+    local nm, ui = line:match("^([^:]+):[^:]*:(%d+):")
+    if nm and ui then uidname[ui] = nm end
+  end
+  local memtotal = tonumber((slurp("/proc/meminfo") or ""):match("MemTotal:%s+(%d+)")) or 0  -- kB
+  local upt = tonumber((slurp("/proc/uptime") or ""):match("^([%d.]+)")) or 0
+  local dirs = popen("ls -1 /proc 2>/dev/null")
+  for pid in dirs:gmatch("(%d+)") do
+    local stat = slurp("/proc/" .. pid .. "/stat")
+    if stat then
+      local comm = stat:match("%((.-)%)")
+      local after = stat:match("%)%s+(.*)$") or ""
+      local f = {}
+      for w in after:gmatch("%S+") do f[#f+1] = w end
+      local ppid = tonumber(f[2]) or 0
+      local utime = tonumber(f[12]) or 0   -- after (comm): 12=utime 13=stime (clk_tck=100)
+      local stime = tonumber(f[13]) or 0
+      local rss_pages = tonumber((slurp("/proc/" .. pid .. "/statm") or "0 0"):match("^%d+%s+(%d+)")) or 0
+      local rss_kb = rss_pages * 4
+      local cmdline = slurp("/proc/" .. pid .. "/cmdline") or ""
+      cmdline = cmdline:gsub("%z", " "):gsub("%s+$", "")
+      if cmdline == "" then cmdline = "[" .. (comm or "?") .. "]" end
+      local uid = (slurp("/proc/" .. pid .. "/status") or ""):match("Uid:%s+(%d+)") or "0"
+      -- keep percentages as STRINGS: rpcd's blobmsg_add_object can't convert
+      -- json_type_double (drops the field + truncates the array).
+      local mempct = (memtotal > 0) and (rss_kb * 100 / memtotal) or 0
+      local cpupct = (upt > 0) and ((utime + stime) / (upt * 100) * 100) or 0
+      list[#list+1] = {
+        PID = tonumber(pid), PPID = ppid, USER = uidname[uid] or uid,
+        VSZ = rss_pages * 4096,
+        ["%MEM"] = string.format("%.1f", mempct),
+        ["%CPU"] = string.format("%.1f", cpupct),
+        COMMAND = cmdline,
+      }
+    end
+  end
+  reply({ result = arr(list) })
+end
+
+function M.getLEDs()
+  local out = {}
+  local ls = popen("ls -1 /sys/class/leds 2>/dev/null")
+  for led in ls:gmatch("[^\n]+") do
+    local base = "/sys/class/leds/" .. led .. "/"
+    local trig = (slurp(base .. "trigger") or ""):match("%[(.-)%]") or "none"
+    out[led] = {
+      trigger = trig,
+      brightness = tonumber((slurp(base .. "brightness") or ""):match("%d+")) or 0,
+      max_brightness = tonumber((slurp(base .. "max_brightness") or ""):match("%d+")) or 255,
+    }
+  end
+  reply(out)
+end
+
+function M.getConntrackList()
+  local list = {}
+  local ct = slurp("/proc/net/nf_conntrack") or slurp("/proc/net/ip_conntrack") or ""
+  for line in ct:gmatch("[^\n]+") do
+    local proto = line:match("^%w+%s+%w+%s+(%w+)") or line:match("^(%w+)")
+    list[#list+1] = { bytes = 0, proto = proto or "unknown", raw = line }
+    if #list >= 4096 then break end
+  end
+  reply({ result = arr(list) })
+end
+
+-- Realtime graphs: shell out to the cross-compiled luci-bwc collector (iwinfo
+-- stubbed) which maintains ring buffers in /var/lib/luci-bwc and prints each
+-- sample as a JSON array line. -t keeps its sampling daemon alive across polls.
+-- We splice the lines into {"result":[...]} verbatim so the big uint64 byte
+-- counters stay INTEGERS (rpcd's blobmsg truncates on json floats).
+function M.getRealtimeStats()
+  local mode = astr("mode") or ""
+  local dev  = (astr("device") or ""):gsub("[^%w%.%-_]", "")
+  local flag
+  if     mode == "interface" then flag = "-i " .. dev
+  elseif mode == "wireless"  then flag = "-r " .. dev
+  elseif mode == "conntrack" then flag = "-c"
+  elseif mode == "load"      then flag = "-l"
+  else io.write('{"result":[]}\n'); io.stdout:flush(); return end
+  -- rpcd's blobmsg clamps int64 to INT32_MAX, so a >2GB byte counter would
+  -- freeze at 2147483647 → flat graph. Reduce every non-timestamp field mod
+  -- 2^31 so it stays a valid int32; the graphs only use consecutive DELTAS,
+  -- which survive the modulo (a wrap every ~2GB is handled like a 32-bit ctr).
+  local function clampline(ln)
+    local nums = {}
+    for n in ln:gmatch("%-?%d+") do nums[#nums+1] = n end
+    if #nums == 0 then return nil end
+    local out = { nums[1] }
+    for i = 2, #nums do out[i] = string.format("%d", (tonumber(nums[i]) or 0) % 2147483648) end
+    return "[" .. table.concat(out, ",") .. "]"
+  end
+  local parts = {}
+  local f = io.popen("/tmp/luci-bwc -t 20 " .. flag .. " 2>/dev/null")
+  if f then
+    for ln in f:lines() do
+      if ln:match("^%s*%[.*%]") then local c = clampline(ln); if c then parts[#parts+1] = c end end
+    end
+    f:close()
+  end
+  io.write('{"result":[' .. table.concat(parts, ",") .. ']}\n'); io.stdout:flush()
+end
+function M.getSwconfigFeatures() reply(nil) end
+function M.getSwconfigPortState() reply(nil) end
+function M.setBlockDetect() reply({ result = true }) end
+
+function M.getBlockDevices()
+  reply({})
+end
+
+function M.getMountPoints()
+  local list = {}
+  local mp = slurp("/proc/mounts") or ""
+  for dev, mount, fs in mp:gmatch("(%S+)%s+(%S+)%s+(%S+)") do
+    if dev:match("^/") then
+      list[#list+1] = { device = dev, mount = mount, fs = fs, size = 0, avail = 0, used = 0 }
+    end
+  end
+  reply({ result = arr(list) })
+end
+
+function M.getTimezones()
+  reply({ UTC = { tzstring = "UTC0" } })
+end
+
+function M.setLocaltime()
+  local t = anum("localtime")
+  if t then os.execute("date -s @" .. math.floor(t) .. " >/dev/null 2>&1") end
+  reply({ result = t or 0 })
+end
+
+function M.setPassword()
+  local user, pass = astr("user"), astr("password")
+  local ok = false
+  if user and pass and user:match("^[%w._-]+$") then
+    local p = io.popen("passwd " .. user .. " >/dev/null 2>&1", "w")
+    if p then p:write(pass .. "\n" .. pass .. "\n"); p:close(); ok = true end
+  end
+  reply({ result = ok })
+end
+
+-- ---------- dispatch ----------
+local cmd, method = arg[1], arg[2]
+if cmd == "list" then
+  reply({
+    getFeatures = {}, getWirelessDevices = {},
+    getInitList = { name = "" }, setInitAction = { name = "", action = "" },
+    getProcessList = {}, getLEDs = {}, getConntrackList = {},
+    getRealtimeStats = { mode = "", device = "" },
+    getSwconfigFeatures = { switch = "" }, getSwconfigPortState = { switch = "" },
+    getBlockDevices = {}, getMountPoints = {},
+    getTimezones = {}, setLocaltime = { localtime = 0 },
+    setPassword = { user = "", password = "" }, setBlockDetect = {},
+  })
+elseif cmd == "call" then
+  readargs()
+  local fn = M[method]
+  if fn then fn() else io.write('{"error":"unknown method"}\n') end
+end

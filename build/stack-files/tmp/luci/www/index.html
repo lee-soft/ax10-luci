@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Archer AX10 — modern rpcd on the 2013 ubus</title>
+<style>
+ body{font-family:system-ui,sans-serif;margin:2em;background:#f4f6f8;color:#222}
+ h1{color:#0069d9;margin-bottom:.2em} h2{margin-top:1.4em}
+ table{border-collapse:collapse;background:#fff;box-shadow:0 1px 3px #0002}
+ td,th{border:1px solid #dde;padding:5px 10px;text-align:left;font-size:14px}
+ th{background:#0069d9;color:#fff} #status{padding:.5em .8em;background:#fff;border-left:4px solid #0069d9;display:inline-block}
+ code{background:#eef;padding:1px 4px;border-radius:3px}
+</style></head><body>
+<h1>Modern LuCI backend on TP-Link's 2013 ubus</h1>
+<p>19.07 <code>rpcd</code> + <code>rpcd-mod-luci</code> + <code>uhttpd</code> cross-compiled onto the firmware's original ubusd, sharing the bus with netifd.</p>
+<div id="status">connecting…</div>
+<h2>Network devices <small>(luci-rpc.getNetworkDevices)</small></h2>
+<table id="devs"><tr><th>Device</th><th>Up</th><th>MTU</th><th>IPv4</th><th>IPv6</th></tr></table>
+<h2>DHCP leases <small>(luci-rpc.getDHCPLeases)</small></h2>
+<table id="leases"><tr><th>Hostname</th><th>IP</th><th>MAC</th></tr></table>
+<script>
+const UBUS="/ubus", NULLSID="00000000000000000000000000000000";
+async function ubus(sid,obj,fn,args){
+  const r=await fetch(UBUS,{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({jsonrpc:"2.0",id:1,method:"call",params:[sid,obj,fn,args||{}]})});
+  const j=await r.json();
+  if(j.error) throw new Error(j.error.message);
+  if(j.result[0]!==0) throw new Error("ubus status "+j.result[0]);
+  return j.result[1];
+}
+(async()=>{
+  const st=document.getElementById("status");
+  try{
+    const login=await ubus(NULLSID,"session","login",{username:"root",password:"ilovexx"});
+    const sid=login.ubus_rpc_session;
+    st.textContent="✓ authenticated — session "+sid.slice(0,12)+"…";
+    const devs=await ubus(sid,"luci-rpc","getNetworkDevices",{});
+    const dt=document.getElementById("devs");
+    Object.keys(devs).sort().forEach(n=>{const d=devs[n];
+      const v4=(d.ipaddrs||[]).map(a=>a.address||a).join(", ");
+      const v6=(d.ip6addrs||[]).map(a=>a.address||a).join(", ");
+      dt.insertAdjacentHTML("beforeend",`<tr><td>${n}</td><td>${d.up?"yes":"no"}</td><td>${d.mtu||""}</td><td>${v4}</td><td>${v6}</td></tr>`);});
+    const lz=await ubus(sid,"luci-rpc","getDHCPLeases",{family:4});
+    const lt=document.getElementById("leases");
+    (lz.dhcp_leases||[]).forEach(l=>lt.insertAdjacentHTML("beforeend",
+      `<tr><td>${l.hostname||"?"}</td><td>${l.ipaddr||""}</td><td>${l.macaddr||""}</td></tr>`));
+  }catch(e){ st.style.borderColor="#d9534f"; st.textContent="✗ "+e.message; }
+})();
+</script></body></html>

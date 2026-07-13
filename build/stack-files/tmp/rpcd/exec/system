@@ -1,0 +1,87 @@
+#!/usr/bin/lua
+-- rpcd exec plugin: provides ubus object "system" (board + info) that procd
+-- would normally supply. This TP-Link firmware has no procd, so LuCI's overview
+-- (10_system / 20_memory) and the theme header get nothing → hostname "?",
+-- blank uptime/memory. Values sourced live from /proc.
+-- Protocol: `<exe> list` -> method sigs ; `<exe> call <method>` (args on stdin)
+
+local ESC = {['"']='\\"', ['\\']='\\\\', ['\n']='\\n', ['\r']='\\r', ['\t']='\\t'}
+local function enc(v)
+  local t = type(v)
+  if v == nil then return "null"
+  elseif t == "boolean" then return v and "true" or "false"
+  elseif t == "number" then
+    if v ~= v or v == math.huge or v == -math.huge then return "0" end
+    if v == math.floor(v) then return string.format("%d", v) end
+    return string.format("%.6f", v)
+  elseif t == "string" then
+    return '"' .. v:gsub('[%z\1-\31\\"]', function(c)
+      return ESC[c] or string.format('\\u%04x', string.byte(c)) end) .. '"'
+  elseif t == "table" then
+    local n, isarr = 0, true
+    for k in pairs(v) do n = n + 1; if type(k) ~= "number" then isarr = false end end
+    if isarr and n > 0 then for i = 1, n do if v[i] == nil then isarr = false break end end
+    else isarr = false end
+    local p = {}
+    if isarr then
+      for i = 1, n do p[i] = enc(v[i]) end
+      return "[" .. table.concat(p, ",") .. "]"
+    end
+    for k, val in pairs(v) do p[#p+1] = enc(tostring(k)) .. ":" .. enc(val) end
+    return "{" .. table.concat(p, ",") .. "}"
+  end
+  return "null"
+end
+local function reply(v) io.write(enc(v)); io.write("\n"); io.stdout:flush() end
+
+local function slurp(p) local f = io.open(p, "r"); if not f then return nil end; local s = f:read("*a"); f:close(); return s end
+
+local M = {}
+
+function M.board()
+  local kernel   = (slurp("/proc/sys/kernel/osrelease") or ""):match("%S+") or ""
+  local hostname = (slurp("/proc/sys/kernel/hostname") or ""):match("%S+") or "Archer_AX10"
+  local arch     = (slurp("/proc/cpuinfo") or ""):match("model name%s*:%s*([^\n]+)") or "ARMv7"
+  local dtmodel  = (slurp("/proc/device-tree/model") or ""):gsub("%z", ""):match("[^\n]*")
+  local model    = "TP-Link Archer AX10"
+  if dtmodel and dtmodel ~= "" then model = model .. " (" .. dtmodel .. ")" end
+  reply({
+    kernel = kernel, hostname = hostname, system = arch, model = model,
+    board_name = "tplink,archer-ax10",
+    release = {
+      distribution = "OpenWrt",
+      version      = "21.02 (modern LuCI on 2013 ubus)",
+      revision     = "git-23.093.57360",
+      target       = "bcm63xx/generic",
+      description  = "OpenWrt 21.02 LuCI on TP-Link Archer AX10",
+    },
+  })
+end
+
+function M.info()
+  local up = tonumber((slurp("/proc/uptime") or ""):match("^(%d+)")) or 0
+  local l1, l5, l15 = (slurp("/proc/loadavg") or "0 0 0"):match("([%d.]+)%s+([%d.]+)%s+([%d.]+)")
+  local function ld(x) return math.floor((tonumber(x) or 0) * 65536) end
+  local mem = {}
+  for k, val in (slurp("/proc/meminfo") or ""):gmatch("(%w+):%s+(%d+)") do mem[k] = tonumber(val) * 1024 end
+  reply({
+    localtime = os.time(),
+    uptime = up,
+    load = { ld(l1), ld(l5), ld(l15) },
+    memory = {
+      total     = mem.MemTotal or 0,  free      = mem.MemFree or 0,
+      shared    = mem.Shmem or 0,     buffered  = mem.Buffers or 0,
+      cached    = mem.Cached or 0,    available = mem.MemAvailable or 0,
+    },
+    swap = { total = mem.SwapTotal or 0, free = mem.SwapFree or 0 },
+  })
+end
+
+local cmd, method = arg[1], arg[2]
+if cmd == "list" then
+  reply({ board = {}, info = {} })
+elseif cmd == "call" then
+  io.read("*a")  -- drain arg blob
+  local fn = M[method]
+  if fn then fn() else io.write('{"error":"unknown method"}\n') end
+end
