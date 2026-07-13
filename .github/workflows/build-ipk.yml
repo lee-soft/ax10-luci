@@ -1,0 +1,26 @@
+name: build-ipk
+
+# Packs this package into an .ipk and publishes it to the repo's rolling "ipk" release.
+# The archer-ax10 feed aggregates these per-package .ipks into Packages(.gz).
+
+on:
+  push:
+    paths: ['control', 'data/**', 'preinst', 'postinst', 'prerm', 'postrm', 'conffiles', 'pack.sh', '.github/workflows/build-ipk.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  ipk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pack .ipk
+        run: sh pack.sh
+      - name: Publish .ipk to the 'ipk' release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create ipk dist/*.ipk --title "opkg package (.ipk)" --notes "Latest built package. Consumed by the archer-ax10 feed." \
+            || gh release upload ipk dist/*.ipk --clobber
