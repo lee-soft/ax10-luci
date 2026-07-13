@@ -27,12 +27,18 @@ Then browse to `http://<router>:8080` (log in with your web-GUI password — see
   the cgi-io `LD_LIBRARY_PATH` wrappers, `board.json`, and registers rpcd + uhttpd with
   `ax10-svc`.
 
-## Building from source
+## Built from source
 
-The stack is built with the [newstack](../../../newstack) glibc-2.26 cross toolchain from
-pinned OpenWrt-19.07 sources (rpcd/uhttpd/cgi-io/lucihttp/json-c) plus the LuCI 19.07/21.02
-trees. Recipes live under `build/` (see the newstack repo for the toolchain image). The
-prebuilt tarballs are vendored here so the package installs without a local build.
+`luci-stack.tar.gz` (the C backend — `rpcd.bin`, `uhttpd19`, `luci.so`, `uhttpd_ubus.so`,
+`luci-bwc`) is **built from source in CI** by `build/build.sh` inside the
+[newstack](../../../newstack) glibc-2.26 toolchain image, from pinned OpenWrt-19.07 sources
+(rpcd, uhttpd, rpcd-mod-luci, luci-bwc) + json-c 0.13, linked against the newstack
+`luci-bundle` (the license-clean platform sysroot + the `hdrfix` ABI shims that let 19.07 code
+build against the router's 2013 ubus ABI). Sources are mirrored to this repo's Releases; the
+binaries are **not** committed. Validated on the router (serves LuCI on :8080).
+
+`luci-dist.tar.gz` (the LuCI 21.02 Lua/JS web UI tree) is still **vendored** — building it from
+source (assembling the UI + its Lua `.so` modules) is phase 2.
 
 ## License
 
