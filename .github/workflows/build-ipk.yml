@@ -14,26 +14,35 @@ permissions:
   contents: write
 
 jobs:
-  ipk:
+  build:
     runs-on: ubuntu-latest
     container: ghcr.io/lee-soft/newstack:latest      # glibc-2.26 ARM cross toolchain on PATH
     steps:
       - uses: actions/checkout@v4
-
       - name: Build luci-stack from source
         run: sh build/build.sh
-
-      - name: Stage the built luci-stack into the package
+      - name: Stage the built luci-stack into the package + pack .ipk
         run: |
           cp build/out/luci-stack.tar.gz data/opt/ax10-luci/luci-stack.tar.gz
-          ls -l data/opt/ax10-luci/
+          sh pack.sh
+          ls -l dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ipk
+          path: dist/*.ipk
 
-      - name: Pack .ipk
-        run: sh pack.sh
-
+  publish:
+    needs: build
+    runs-on: ubuntu-latest      # normal runner (has gh CLI); container has no gh
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ipk
+          path: dist
       - name: Publish .ipk to the 'ipk' release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           gh release create ipk dist/*.ipk --title "opkg package (.ipk)" --notes "luci-stack built from source via newstack; luci-dist vendored (phase 2)." \
             || gh release upload ipk dist/*.ipk --clobber
