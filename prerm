@@ -1,0 +1,5 @@
+#!/bin/sh
+/tmp/opt/ax10-svc del luci-uhttpd
+/tmp/opt/ax10-svc del luci-rpcd
+/usr/bin/killall rpcd.bin uhttpd19 2>/dev/null
+exit 0

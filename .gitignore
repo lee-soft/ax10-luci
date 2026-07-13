@@ -1,0 +1,10 @@
+# build scratch + fetched sources / outputs
+/build/src/
+/build/work/
+/build/out/
+*.o
+*.ipk
+# editor / OS
+*.swp
+*~
+.DS_Store

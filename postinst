@@ -1,0 +1,6 @@
+#!/bin/sh
+# Run by ax10-configure (IPKG_INSTROOT=/tmp). Extract + wire up the LuCI stack and
+# supervise rpcd + uhttpd via ax10-svc.
+chmod +x "${IPKG_INSTROOT}/opt/ax10-luci/luci-setup.sh" 2>/dev/null
+/bin/sh /tmp/opt/ax10-luci/luci-setup.sh
+exit 0

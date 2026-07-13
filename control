@@ -1,0 +1,8 @@
+Package: ax10-luci
+Version: 1.0-1
+Architecture: all
+Maintainer: Lee Chantrey <lchantrey@gmail.com>
+Section: net
+Priority: optional
+Depends: ax10-svc, ax10-wifi
+Description: Modern LuCI 21.02 web UI for the TP-Link Archer AX10, running a cross-built 19.07 rpcd + uhttpd on the firmware's 2013 ubusd. Serves the web GUI on :8080. rpcd and uhttpd are supervised by init-respawn via ax10-svc (this retires the webwatch keep-alive). Depends on ax10-wifi so the wireless page can actually apply changes.
