@@ -1,0 +1,1 @@
+'use strict';'require network';return network.registerProtocol('dhcp6s',{getI18n:function(){return _('DHCPv6 server');}});

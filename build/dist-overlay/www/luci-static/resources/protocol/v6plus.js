@@ -1,0 +1,1 @@
+'use strict';'require network';return network.registerProtocol('v6plus',{getI18n:function(){return _('MAP-E (v6plus)');}});

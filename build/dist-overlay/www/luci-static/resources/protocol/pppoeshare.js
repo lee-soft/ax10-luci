@@ -1,0 +1,1 @@
+'use strict';'require network';return network.registerProtocol('pppoeshare',{getI18n:function(){return _('PPPoE (shared)');}});

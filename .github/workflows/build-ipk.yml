@@ -21,9 +21,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build luci-stack from source
         run: sh build/build.sh
-      - name: Stage the built luci-stack into the package + pack .ipk
+      - name: Stage the built luci-stack + luci-dist into the package + pack .ipk
         run: |
           cp build/out/luci-stack.tar.gz data/opt/ax10-luci/luci-stack.tar.gz
+          cp build/out/luci-dist.tar.gz  data/opt/ax10-luci/luci-dist.tar.gz
           sh pack.sh
           ls -l dist
       - uses: actions/upload-artifact@v4

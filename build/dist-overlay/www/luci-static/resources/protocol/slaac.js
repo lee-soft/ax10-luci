@@ -1,0 +1,1 @@
+'use strict';'require network';return network.registerProtocol('slaac',{getI18n:function(){return _('SLAAC');}});

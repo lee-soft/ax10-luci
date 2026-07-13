@@ -1,0 +1,27 @@
+{
+	"luci-archer": {
+		"description": "Grants for the custom Archer AX10 rpcd exec plugins (luci/iwinfo/system), the per-interface network-status shim, and busybox-compatible log commands that back the modern LuCI UI on the 2013 ubus",
+		"read": {
+			"cgi-io": [ "exec" ],
+			"file": {
+				"/usr/sbin/logread": [ "exec" ],
+				"/sbin/logread": [ "exec" ],
+				"/bin/dmesg": [ "exec" ],
+				"/usr/sbin/ip -[46] neigh show": [ "exec" ],
+				"/usr/sbin/ip -[46] route show table all": [ "exec" ]
+			},
+			"ubus": {
+				"luci": [ "getWirelessDevices" ],
+				"iwinfo": [ "devices", "info", "assoclist", "freqlist", "txpowerlist", "countrylist", "scan", "phyname", "survey" ],
+				"file": [ "exec", "read", "stat", "list" ],
+				"network.interface": [ "dump", "status" ],
+				"network.interface.*": [ "status" ],
+				"network.interface.wan": [ "status" ],
+				"network.interface.lan": [ "status" ],
+				"network.interface.wanv6": [ "status" ],
+				"network.interface.loopback": [ "status" ],
+				"network.device": [ "status" ]
+			}
+		}
+	}
+}

@@ -1,0 +1,1 @@
+'use strict';'require network';return network.registerProtocol('rdnss',{getI18n:function(){return _('RDNSS relay');}});

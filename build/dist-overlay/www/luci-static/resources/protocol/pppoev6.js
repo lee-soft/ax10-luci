@@ -1,0 +1,1 @@
+'use strict';'require network';return network.registerProtocol('pppoev6',{getI18n:function(){return _('PPPoEv6');}});

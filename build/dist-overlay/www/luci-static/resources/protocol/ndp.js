@@ -1,0 +1,1 @@
+'use strict';'require network';return network.registerProtocol('ndp',{getI18n:function(){return _('NDP relay');}});

@@ -1,0 +1,3 @@
+#!/bin/sh
+export LD_LIBRARY_PATH=/tmp/luci:/tmp/rpcd/lib2:/tmp/luci-app/usr/lib
+exec /usr/bin/lua /tmp/luci-app/www/cgi-bin/luci.lua

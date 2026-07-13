@@ -20,7 +20,7 @@ echo ">> $($CC --version | head -1)"
 
 # --- bundle (hdrfix + platform sysroot + old-ABI libs) ---
 if [ -n "$BUNDLE_DIR" ]; then B="$BUNDLE_DIR"; else
-  curl -fsSL "${BUNDLE_URL:-https://github.com/lee-soft/newstack/releases/download/luci-bundle-v2/luci-bundle.tar.gz}" -o b.tgz
+  curl -fsSL "${BUNDLE_URL:-https://github.com/lee-soft/newstack/releases/download/luci-bundle-v3/luci-bundle.tar.gz}" -o b.tgz
   tar xzf b.tgz; B="$WORK/luci-bundle"
 fi
 HDRFIX="$B/hdrfix"; SRINC="$B/sysroot/include"; SRLIB="$B/sysroot/lib"; UBOX="$B/libubox2013"; UBUS="$B/ubus2013"
@@ -30,7 +30,7 @@ STAGING="$WORK/staging"; INC="$WORK/inc"; mkdir -p "$STAGING" "$INC"
 get() { if [ -n "$SRCDIR" ]; then cp "$SRCDIR/$1-src.tar.gz" "$1.tgz"; else
         curl -fsSL "${SRCBASE:-https://github.com/lee-soft/ax10-luci/releases/download/luci-src-v2}/$1-src.tar.gz" -o "$1.tgz"; fi
       tar xzf "$1.tgz"; }
-for s in json-c rpcd uhttpd rpcd-mod-luci; do get "$s"; done
+for s in json-c rpcd uhttpd rpcd-mod-luci cgi-io lucihttp luci-lib-ip luci-lib-jsonc luci-base-src; do get "$s"; done
 
 COMMON="-I$HDRFIX -I$SRINC -I$INC -Wno-error"
 LFLAGS="-L$UBOX -L$UBUS -L$SRLIB -L$STAGING/lib -Wl,-rpath-link,$UBOX:$UBUS:$SRLIB:$STAGING/lib"
@@ -87,3 +87,39 @@ cp "$UBOX/libubox.so" "$UBOX/libblobmsg_json.so" "$UBOX/libjson_script.so" "$STA
 "${CROSS}strip" "$PKG/tmp/rpcd.bin" "$PKG/tmp/luci/uhttpd19" "$PKG/tmp/rpcd/lib/luci.so" "$PKG/tmp/luci/uhttpd_ubus.so" "$PKG/tmp/luci-bwc" 2>/dev/null || true
 ( cd "$PKG" && tar --owner=0 --group=0 -czf "$OUT/luci-stack.tar.gz" . )
 echo ">> built $OUT/luci-stack.tar.gz ($(tar tzf "$OUT/luci-stack.tar.gz" | wc -l) entries)"
+
+# ============================================================
+# luci-dist.tar.gz — the LuCI 21.02 web UI. "From source" = the C .so modules compiled
+# here, overlaid onto the upstream LuCI .ipk payloads (the Lua/JS UI, unmodified upstream)
+# + our hand-patched files. luci-bwc is taken as-is from luci-mod-status.ipk (musl prebuilt).
+# ============================================================
+cmk cgi-io   "-Os -Wall -Wextra --std=gnu99 -g3 -Wno-unused-parameter -Wmissing-declarations"
+cmk lucihttp "-Os -ggdb -Wall --std=gnu99 -Wmissing-declarations -Wno-format-truncation -I$SRINC" "" "-DLUA_CFLAGS=-I$SRINC -DLUAPATH=/usr/lib/lua -DLUA_LIBRARIES=-llua -DBUILD_UCODE=OFF"
+# luci Lua C modules (plain OpenWrt src makefiles -> compile directly)
+"$CC" $COMMON -I"$SRINC/libnl-tiny" -std=gnu99 -fPIC -c "$WORK/luci-lib-ip/ip.c" -o "$WORK/ip.o"
+"$CC" -shared -o "$WORK/ip.so" "$WORK/ip.o" -L"$SRLIB" -llua -lm -lnl-tiny
+"$CC" $COMMON -std=gnu99 -fPIC -c "$WORK/luci-lib-jsonc/jsonc.c" -o "$WORK/jsonc.o"
+"$CC" -shared -o "$WORK/jsonc.so" "$WORK/jsonc.o" -L"$SRLIB" -L"$STAGING/lib" -llua -lm -ljson-c
+( cd "$WORK/luci-base-src" \
+  && "$CC" $COMMON -std=gnu99 -fPIC -c template_parser.c template_lmo.c template_utils.c template_lualib.c plural_formula.c \
+  && "$CC" -shared -o parser.so template_parser.o template_lmo.o template_utils.o template_lualib.o plural_formula.o -L"$SRLIB" -llua -lm )
+
+DIST="$WORK/luci-dist"; rm -rf "$DIST"; mkdir -p "$DIST"
+LUCI_IPKS="luci-base luci-compat luci-lib-base luci-mod-network luci-mod-status luci-mod-system luci-theme-bootstrap"
+if [ -z "$IPKDIR" ]; then
+  IPKDIR="$WORK/ipks"; mkdir -p "$IPKDIR"
+  for p in $LUCI_IPKS; do curl -fsSL "${IPKBASE:-https://github.com/lee-soft/ax10-luci/releases/download/luci-dist-ipks}/$p.ipk" -o "$IPKDIR/$p.ipk"; done
+fi
+for p in $LUCI_IPKS; do tar xzOf "$IPKDIR/$p.ipk" ./data.tar.gz | tar xz -C "$DIST"; done   # upstream Lua/JS UI + luci-bwc
+mkdir -p "$DIST/usr/lib/lua/luci/template" "$DIST/usr/libexec"
+cp "$WORK/rpcd/B/file.so"                 "$DIST/file.so"
+cp "$WORK/cgi-io/B/cgi-io"                "$DIST/usr/libexec/cgi-io"
+cp "$WORK/lucihttp/B/liblucihttp.so.0.1"  "$DIST/usr/lib/liblucihttp.so"
+cp "$WORK/lucihttp/B/lua/lucihttp.so"     "$DIST/usr/lib/lua/lucihttp.so"
+cp "$WORK/ip.so"                          "$DIST/usr/lib/lua/luci/ip.so"
+cp "$WORK/jsonc.so"                       "$DIST/usr/lib/lua/luci/jsonc.so"
+cp "$WORK/luci-base-src/parser.so"        "$DIST/usr/lib/lua/luci/template/parser.so"
+cp -a "$HERE/dist-overlay/." "$DIST/"     # version.lua, dispatcher.lua, cgi-bin wrappers, luci-archer.json
+"${CROSS}strip" "$DIST/file.so" "$DIST/usr/libexec/cgi-io" "$DIST/usr/lib/liblucihttp.so" "$DIST/usr/lib/lua/lucihttp.so" "$DIST/usr/lib/lua/luci/template/parser.so" 2>/dev/null || true
+( cd "$DIST" && tar --owner=0 --group=0 -czf "$OUT/luci-dist.tar.gz" . )
+echo ">> built $OUT/luci-dist.tar.gz ($(tar tzf "$OUT/luci-dist.tar.gz" | wc -l) entries)"

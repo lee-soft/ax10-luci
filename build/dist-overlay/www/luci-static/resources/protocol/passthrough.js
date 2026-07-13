@@ -1,0 +1,1 @@
+'use strict';'require network';return network.registerProtocol('passthrough',{getI18n:function(){return _('Pass-through');}});

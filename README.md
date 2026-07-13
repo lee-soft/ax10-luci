@@ -37,8 +37,13 @@ Then browse to `http://<router>:8080` (log in with your web-GUI password — see
 build against the router's 2013 ubus ABI). Sources are mirrored to this repo's Releases; the
 binaries are **not** committed. Validated on the router (serves LuCI on :8080).
 
-`luci-dist.tar.gz` (the LuCI 21.02 Lua/JS web UI tree) is still **vendored** — building it from
-source (assembling the UI + its Lua `.so` modules) is phase 2.
+`luci-dist.tar.gz` (the LuCI 21.02 web UI) is also **built from source**: `build/build.sh`
+cross-compiles its C modules (cgi-io, liblucihttp + Lua binding, and the luci `ip`/`jsonc`/
+`template.parser` Lua `.so`s) with the newstack toolchain, then overlays them onto the upstream
+LuCI 21.02 `.ipk` payloads (the Lua/JS UI, unmodified upstream — mirrored to this repo's
+Releases) plus a few hand-patched files (`dispatcher.lua` path fixes, the custom
+`luci-archer.json` ACL, the `/tmp/luci-app` cgi wrappers). `luci-bwc` is taken as-is from the
+upstream `luci-mod-status` package. Validated on the router: full LuCI serves on :8080.
 
 ## License
 
