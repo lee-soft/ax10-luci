@@ -1,5 +1,7 @@
 # ax10-luci
 
+> ⚡ **Just want it working, not the source?** Prebuilt binaries + a one-command install are at **[archer-boot.pages.dev](https://archer-boot.pages.dev)**.
+
 Modern **LuCI 21.02** web UI for the TP-Link Archer AX10, running a cross-built **19.07 rpcd +
 uhttpd** on the firmware's 2013-vintage `ubusd`. Serves the web GUI on **:8080**. `rpcd` and
 `uhttpd` are supervised by init-respawn via `ax10-svc` (this retires the old `webwatch`
